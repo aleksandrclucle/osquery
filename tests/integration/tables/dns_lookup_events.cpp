@@ -8,12 +8,13 @@
  */
 
 // Sanity check integration test for dns_lookup_events
-// Spec file: specs/posix/dns_lookup_events.table
+// Spec file: specs/macwin/dns_lookup_events.table
 
 #include <osquery/config/config.h>
 #include <osquery/dispatcher/dispatcher.h>
 #include <osquery/events/events.h>
 #include <osquery/registry/registry.h>
+#include <osquery/sql/sql.h>
 #include <osquery/tests/integration/tables/helper.h>
 
 namespace osquery {
@@ -27,21 +28,26 @@ class dnsLookupEvents : public testing::Test {
   void SetUp() override {
     setUpEnvironment();
 
+#ifdef OSQUERY_WINDOWS
     // Enable ETW DNS events
     RegistryFactory::get().registry("config_parser")->setUp();
     FLAGS_enable_dns_lookup_events = true;
 
     // Start eventing framework
     attachEvents();
+#endif
   }
 
   void TearDown() override {
+#ifdef OSQUERY_WINDOWS
     Dispatcher::instance().stopServices();
     Dispatcher::instance().joinServices();
     Dispatcher::instance().resetStopping();
+#endif
   }
 };
 
+#ifdef OSQUERY_WINDOWS
 TEST_F(dnsLookupEvents, test_sanity) {
   // Ping to generate DNS lookups
   system("ping hostname.invalid"); // invalid, will fail
@@ -108,5 +114,21 @@ TEST_F(dnsLookupEvents, test_sanity) {
     }
   }
 }
+#else
+TEST_F(dnsLookupEvents, test_schema) {
+  // Preparing the query checks native table registration without starting the
+  // private log source or depending on DNS traffic and macOS privacy settings.
+  TableColumns columns;
+  auto status = getQueryColumns(
+      "SELECT eid, time, time_windows, datetime, pid, path, username, name, "
+      "type, type_id, status, response, timestamp, kind, client_process, "
+      "responder_pid, request_id, question_id, api, interface_index, expired, "
+      "correlated, redacted FROM dns_lookup_events",
+      columns);
+  ASSERT_TRUE(status.ok()) << status.getMessage();
+  EXPECT_EQ(columns.size(), 23U);
+}
+#endif
+
 } // namespace table_tests
 } // namespace osquery

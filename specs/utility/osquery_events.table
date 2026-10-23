@@ -11,6 +11,7 @@ schema([
     Column("refreshes", INTEGER, "Publisher only: number of runloop restarts"),
     Column("active", INTEGER,
       "1 if the publisher or subscriber is active else 0"),
+    Column("details", TEXT, "Source-specific diagnostic fields as a JSON object of strings, or {} when unavailable"),
 ])
 attributes(utility=True)
 implementation("osquery@genOsqueryEvents")

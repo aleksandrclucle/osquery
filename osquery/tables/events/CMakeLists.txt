@@ -37,6 +37,7 @@ function(generateOsqueryTablesEventsEventstable)
   elseif(DEFINED PLATFORM_MACOS)
     list(APPEND source_files
       darwin/disk_events.cpp
+      darwin/dns_lookup_events.cpp
       darwin/es_process_events.cpp
       darwin/es_process_file_events.cpp
       darwin/file_events.cpp

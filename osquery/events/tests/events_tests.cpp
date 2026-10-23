@@ -45,6 +45,24 @@ class BasicEventPublisher
 class AnotherBasicEventPublisher
     : public EventPublisher<SubscriptionContext, EventContext> {};
 
+TEST(EventerTests, default_details_are_empty) {
+  Eventer eventer;
+  EXPECT_TRUE(eventer.getDetails().empty());
+}
+
+TEST(EventerTests, details_override_is_dispatched_through_base) {
+  class DiagnosticEventer final : public Eventer {
+   public:
+    Row getDetails() const override {
+      return {{"source_running", "1"}, {"last_error", ""}};
+    }
+  } eventer;
+
+  const Eventer& base = eventer;
+  const Row expected{{"source_running", "1"}, {"last_error", ""}};
+  EXPECT_EQ(base.getDetails(), expected);
+}
+
 // Create some semi-useless subscription and event structures.
 struct FakeSubscriptionContext : SubscriptionContext {
   int require_this_value;

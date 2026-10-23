@@ -12,6 +12,10 @@
 
 namespace osquery {
 
+Row Eventer::getDetails() const {
+  return {};
+}
+
 EventState Eventer::state() const {
   return state_;
 }

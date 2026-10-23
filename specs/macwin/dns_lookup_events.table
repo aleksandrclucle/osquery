@@ -1,0 +1,36 @@
+table_name("dns_lookup_events")
+description("DNS lookups observed through the Windows DNS stack or macOS mDNSResponder live logs. Enable with --enable_dns_lookup_events and --disable_events=false.")
+schema([
+    # Native event IDs are padded decimal strings. Keep them as TEXT on macOS
+    # while preserving the existing Windows INTEGER schema.
+    Column("eid", TEXT if PLATFORM in DARWIN else INTEGER, "Event ID; TEXT on macOS, INTEGER on Windows", hidden=True),
+    Column("time", BIGINT, "Event timestamp in Unix seconds; storage time on macOS", hidden=True, additional=True),
+    Column("time_windows", BIGINT, "Event timestamp in Windows format; 0 on macOS", hidden=True),
+    Column("datetime", DATETIME, "Source event timestamp in Unix seconds"),
+    Column("pid", BIGINT, "Process ID of process making the lookup; -1 when unavailable on macOS"),
+    Column("path", TEXT, "Path to binary of process making the lookup; unavailable on macOS and sometimes unavailable for very short-lived Windows processes"),
+    Column("username", TEXT, "User rights - primary token username; unavailable on macOS"),
+    Column("name", TEXT, "Name being queried in lookup; may be redacted or unavailable on macOS"),
+    Column("type", TEXT, "DNS record type of lookup as string"),
+    Column("type_id", INTEGER, "Integer type ID for record type; -1 when unavailable on macOS"),
+    Column("status", INTEGER, "Response status code; -1 on macOS because the source does not provide a status code"),
+    Column("response", TEXT, "Results returned by lookup; may contain a privacy placeholder or <none> on macOS"),
+])
+extended_schema(DARWIN, [
+    Column("timestamp", TEXT, "Original log timestamp in UTC"),
+    Column("kind", TEXT, "Event kind: query, answer, remove, or no_data"),
+    Column("client_process", TEXT, "Client process name from the corresponding request"),
+    Column("responder_pid", BIGINT, "PID of the mDNSResponder source process"),
+    Column("request_id", TEXT, "mDNSResponder request identifier"),
+    Column("question_id", TEXT, "mDNSResponder question identifier"),
+    Column("api", TEXT, "DNSServiceQueryRecord or DNSServiceGetAddrInfo"),
+    Column("interface_index", BIGINT, "Result interface index; -1 when unavailable"),
+    Column("expired", INTEGER, "1 if the result was marked expired"),
+    Column("correlated", INTEGER, "1 if the corresponding request was observed"),
+    Column("redacted", INTEGER, "1 if the name or response contains a privacy placeholder"),
+])
+attributes(event_subscriber=True)
+implementation("dns_lookup_events@dns_lookup_events::genTable")
+examples([
+    "select * from dns_lookup_events;",
+])
