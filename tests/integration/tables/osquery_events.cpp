@@ -11,6 +11,7 @@
 // Spec file: specs/utility/osquery_events.table
 
 #include <osquery/tests/integration/tables/helper.h>
+#include <osquery/utils/json/json.h>
 
 namespace osquery {
 namespace table_tests {
@@ -23,26 +24,28 @@ class osqueryEvents : public testing::Test {
 };
 
 TEST_F(osqueryEvents, test_sanity) {
+  const auto schema = execute_query("PRAGMA table_xinfo(osquery_events)");
+  auto details_count = 0U;
+  for (const auto& column : schema) {
+    if (column.at("name") == "details") {
+      ++details_count;
+      EXPECT_EQ(column.at("type"), "TEXT");
+    }
+  }
+  ASSERT_EQ(details_count, 1U);
+
   // 1. Query data
   auto const data = execute_query("select * from osquery_events");
-  // 2. Check size before validation
-  // ASSERT_GE(data.size(), 0ul);
-  // ASSERT_EQ(data.size(), 1ul);
-  // ASSERT_EQ(data.size(), 0ul);
-  // 3. Build validation map
-  // See helper.h for available flags
-  // Or use custom DataCheck object
-  // ValidationMap row_map = {
-  //      {"name", NormalType}
-  //      {"publisher", NormalType}
-  //      {"type", NormalType}
-  //      {"subscriptions", IntType}
-  //      {"events", IntType}
-  //      {"refreshes", IntType}
-  //      {"active", IntType}
-  //}
-  // 4. Perform validation
-  // validate_rows(data, row_map);
+  for (const auto& row : data) {
+    const auto details = row.find("details");
+    ASSERT_NE(details, row.end());
+    JSON doc;
+    ASSERT_TRUE(doc.fromString(details->second).ok());
+    ASSERT_TRUE(doc.doc().IsObject());
+    for (const auto& member : doc.doc().GetObject()) {
+      EXPECT_TRUE(member.value.IsString());
+    }
+  }
 }
 
 } // namespace table_tests

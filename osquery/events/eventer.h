@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include <osquery/core/sql/row.h>
+
 namespace osquery {
 
 /**
@@ -38,6 +40,17 @@ enum class EventState {
 
 class Eventer {
  public:
+  virtual ~Eventer() = default;
+
+  /**
+   * @brief Optional source-specific diagnostic fields for osquery_events.
+   *
+   * Return a bounded snapshot without blocking collection or doing I/O. Values
+   * are serialized as JSON strings in the details column. Implementations must
+   * synchronize with their collection threads. The default is an empty object.
+   */
+  virtual Row getDetails() const;
+
   /**
    * @brief Request the subscriber's initialization state.
    *

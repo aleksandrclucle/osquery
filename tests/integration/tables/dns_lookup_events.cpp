@@ -8,7 +8,10 @@
  */
 
 // Sanity check integration test for dns_lookup_events
-// Spec file: specs/posix/dns_lookup_events.table
+// Spec file: specs/macwin/dns_lookup_events.table
+
+#include <set>
+#include <string>
 
 #include <osquery/config/config.h>
 #include <osquery/dispatcher/dispatcher.h>
@@ -27,21 +30,26 @@ class dnsLookupEvents : public testing::Test {
   void SetUp() override {
     setUpEnvironment();
 
+#ifdef OSQUERY_WINDOWS
     // Enable ETW DNS events
     RegistryFactory::get().registry("config_parser")->setUp();
     FLAGS_enable_dns_lookup_events = true;
 
     // Start eventing framework
     attachEvents();
+#endif
   }
 
   void TearDown() override {
+#ifdef OSQUERY_WINDOWS
     Dispatcher::instance().stopServices();
     Dispatcher::instance().joinServices();
     Dispatcher::instance().resetStopping();
+#endif
   }
 };
 
+#ifdef OSQUERY_WINDOWS
 TEST_F(dnsLookupEvents, test_sanity) {
   // Ping to generate DNS lookups
   system("ping hostname.invalid"); // invalid, will fail
@@ -108,5 +116,54 @@ TEST_F(dnsLookupEvents, test_sanity) {
     }
   }
 }
+#endif
+
+TEST_F(dnsLookupEvents, test_schema) {
+  // Include hidden columns: platform-specific fields must be absent, rather
+  // than merely hidden, on Windows.
+  const auto data = execute_query("PRAGMA table_xinfo(dns_lookup_events)");
+  std::set<std::string> expected_columns = {"eid",
+                                            "time",
+                                            "time_windows",
+                                            "datetime",
+                                            "pid",
+                                            "path",
+                                            "username",
+                                            "name",
+                                            "type",
+                                            "type_id",
+                                            "status",
+                                            "response"};
+#ifndef OSQUERY_WINDOWS
+  expected_columns.insert({"timestamp",
+                           "kind",
+                           "client_process",
+                           "responder_pid",
+                           "request_id",
+                           "question_id",
+                           "api",
+                           "interface_index",
+                           "expired",
+                           "correlated",
+                           "redacted"});
+#endif
+  ASSERT_EQ(data.size(), expected_columns.size());
+  for (const auto& row : data) {
+    const auto& name = row.at("name");
+    EXPECT_EQ(expected_columns.erase(name), 1U) << name;
+    const bool hidden =
+        name == "eid" || name == "time" || name == "time_windows";
+    EXPECT_EQ(row.at("hidden"), hidden ? "1" : "0") << name;
+    if (name == "eid") {
+#ifdef OSQUERY_WINDOWS
+      EXPECT_EQ(row.at("type"), "INTEGER");
+#else
+      EXPECT_EQ(row.at("type"), "TEXT");
+#endif
+    }
+  }
+  EXPECT_TRUE(expected_columns.empty());
+}
+
 } // namespace table_tests
 } // namespace osquery

@@ -24,6 +24,7 @@
 #include <osquery/sql/sql.h>
 #include <osquery/utils/info/platform_type.h>
 #include <osquery/utils/info/version.h>
+#include <osquery/utils/json/json.h>
 #include <osquery/utils/macros/macros.h>
 
 namespace osquery {
@@ -32,6 +33,18 @@ DECLARE_bool(disable_logging);
 DECLARE_bool(disable_events);
 
 namespace tables {
+
+namespace {
+std::string eventDetails(const Eventer& eventer) {
+  auto doc = JSON::newObject();
+  for (const auto& field : eventer.getDetails()) {
+    doc.addCopy(field.first, field.second);
+  }
+  std::string output;
+  doc.toString(output);
+  return output;
+}
+} // namespace
 
 QueryData genOsqueryEvents(QueryContext& context) {
   QueryData results;
@@ -42,9 +55,13 @@ QueryData genOsqueryEvents(QueryContext& context) {
     r["name"] = publisher;
     r["publisher"] = publisher;
     r["type"] = "publisher";
+    r["details"] = "{}";
 
     auto pubref = EventFactory::getEventPublisher(publisher);
     if (pubref != nullptr) {
+      if (context.isColumnUsed("details")) {
+        r["details"] = eventDetails(*pubref);
+      }
       r["subscriptions"] = INTEGER(pubref->numSubscriptions());
       r["events"] = INTEGER(pubref->numEvents());
       r["refreshes"] = INTEGER(pubref->restartCount());
@@ -63,11 +80,15 @@ QueryData genOsqueryEvents(QueryContext& context) {
     Row r;
     r["name"] = subscriber;
     r["type"] = "subscriber";
+    r["details"] = "{}";
     // Subscribers will never 'restart'.
     r["refreshes"] = "0";
 
     auto subref = EventFactory::getEventSubscriber(subscriber);
     if (subref != nullptr) {
+      if (context.isColumnUsed("details")) {
+        r["details"] = eventDetails(*subref);
+      }
       r["publisher"] = subref->getType();
       r["subscriptions"] = INTEGER(subref->numSubscriptions());
       r["events"] = INTEGER(subref->numEvents());

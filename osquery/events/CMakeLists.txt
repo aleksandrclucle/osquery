@@ -39,6 +39,9 @@ function(generateOsqueryEvents)
       darwin/event_taps.cpp
       darwin/fsevents.cpp
       darwin/iokit.cpp
+      darwin/mdns.cpp
+      darwin/mdns_log_stream.mm
+      darwin/mdns_parser.cpp
       darwin/openbsm.cpp
       darwin/scnetwork.cpp
     )
@@ -136,6 +139,9 @@ function(generateOsqueryEvents)
       darwin/event_taps.h
       darwin/fsevents.h
       darwin/iokit.h
+      darwin/mdns.h
+      darwin/mdns_log_stream.h
+      darwin/mdns_parser.h
       darwin/openbsm.h
       darwin/scnetwork.h
     )

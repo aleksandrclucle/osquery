@@ -26,7 +26,11 @@ function(generateOsqueryEventsTestsMergedtestsTest)
       linux/inotify_tests.cpp
     )
   elseif(DEFINED PLATFORM_MACOS)
-    list(APPEND source_files darwin/fsevents_tests.cpp)
+    list(APPEND source_files
+      darwin/fsevents_tests.cpp
+      darwin/mdns_publisher_tests.cpp
+      darwin/mdns_tests.cpp
+    )
   elseif(DEFINED PLATFORM_WINDOWS)
     list(APPEND source_files windows/usn_journal_reader_tests.cpp)
   endif()
