@@ -1,0 +1,45 @@
+table_name("dns_lookup_events")
+description(
+    "DNS lookups observed through the Windows DNS stack or macOS mDNSResponder live logs. "
+    "Collection is disabled by default; enable with --enable_dns_lookup_events=true and "
+    "--disable_events=false, and schedule a query against this table. "
+    "On macOS, rows describe query starts and individual results, including cached answers. "
+    "Resolvers that bypass mDNSResponder are not observed. macOS may redact names and "
+    "answers; enabling private-data logging is optional. Collection on macOS depends on "
+    "private logging APIs and mDNSResponder message formats."
+)
+schema([
+    # Native event IDs are padded decimal strings. Keep them as TEXT on macOS
+    # while preserving the existing Windows INTEGER schema.
+    Column("eid", TEXT if PLATFORM in DARWIN else INTEGER, "Event ID; TEXT on macOS, INTEGER on Windows", hidden=True),
+    Column("time", BIGINT, "Event timestamp in Unix seconds; storage time on macOS", hidden=True, additional=True),
+    Column("time_windows", BIGINT, "Event timestamp in Windows format; 0 on macOS", hidden=True),
+    Column("datetime", DATETIME, "Source event timestamp in Unix seconds"),
+    Column("pid", BIGINT, "Process ID of process making the lookup; -1 when unavailable on macOS"),
+    Column("path", TEXT, "Path to binary of process making the lookup; unavailable on macOS and sometimes unavailable for very short-lived Windows processes"),
+    Column("username", TEXT, "User rights - primary token username; unavailable on macOS"),
+    Column("name", TEXT, "Name being queried in lookup; may be redacted or unavailable on macOS"),
+    Column("type", TEXT, "DNS record type of lookup as string"),
+    Column("type_id", INTEGER, "Integer type ID for record type; -1 when unavailable on macOS"),
+    Column("status", INTEGER, "Response status code; -1 on macOS because the source does not provide a status code"),
+    Column("response", TEXT, "Results returned by lookup; may contain a privacy placeholder or <none> on macOS"),
+])
+if PLATFORM not in WINDOWS:
+    extended_schema(DARWIN, [
+        Column("timestamp", TEXT, "macOS only: original log timestamp in UTC"),
+        Column("kind", TEXT, "macOS only: event kind (query, answer, remove, or no_data)"),
+        Column("client_process", TEXT, "macOS only: client process name from the corresponding request"),
+        Column("responder_pid", BIGINT, "macOS only: PID of the mDNSResponder source process"),
+        Column("request_id", TEXT, "macOS only: mDNSResponder request identifier"),
+        Column("question_id", TEXT, "macOS only: mDNSResponder question identifier"),
+        Column("api", TEXT, "macOS only: DNSServiceQueryRecord or DNSServiceGetAddrInfo"),
+        Column("interface_index", BIGINT, "macOS only: result interface index; -1 when unavailable"),
+        Column("expired", INTEGER, "macOS only: 1 if the result was marked expired"),
+        Column("correlated", INTEGER, "macOS only: 1 if the corresponding request was observed"),
+        Column("redacted", INTEGER, "macOS only: 1 if the name or response contains a privacy placeholder"),
+    ])
+attributes(event_subscriber=True)
+implementation("dns_lookup_events@dns_lookup_events::genTable")
+examples([
+    "select * from dns_lookup_events;",
+])
