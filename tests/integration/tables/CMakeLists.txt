@@ -237,6 +237,7 @@ function(generateTestsIntegrationTablesTestsTest)
       cups_jobs.cpp
       device_firmware.cpp
       disk_events.cpp
+      dns_lookup_events.cpp
       event_taps.cpp
       extended_attributes.cpp
       fan_speed_sensors.cpp
