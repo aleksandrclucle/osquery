@@ -7,11 +7,13 @@
  * SPDX-License-Identifier: (Apache-2.0 OR GPL-2.0-only)
  */
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -25,11 +27,13 @@
 #include <osquery/registry/registry_factory.h>
 #include <osquery/sql/sql.h>
 #include <osquery/utils/info/tool_type.h>
+#include <osquery/utils/system/time.h>
 
 namespace osquery {
 
 DECLARE_bool(enable_dns_lookup_events);
 DECLARE_bool(disable_events);
+DECLARE_uint64(events_max);
 
 namespace {
 
@@ -47,81 +51,113 @@ mdns::Input makeInput(const std::string& message) {
 
 } // namespace
 
-TEST(MDNSPublisherTests, queue_overflow_resets_correlation) {
+TEST(MDNSPublisherTests, queue_overflow_retains_newest_input) {
   MDNSEventPublisher publisher;
-  publisher.record(makeInput(kQuery));
-  ASSERT_EQ(publisher.parser_.pending(), 1U);
-
+  constexpr std::size_t kCapacity{8192U};
   const auto input = makeInput(kAnswer);
-  const auto input_bytes = input.message.size() + input.timestamp.size();
-  constexpr std::size_t kMaxFrames{8192U};
-  for (std::size_t i = 0; i < kMaxFrames; ++i) {
+  const auto bytes = input.message.size() + input.timestamp.size();
+  for (std::size_t i = 0; i < kCapacity; ++i) {
     publisher.enqueue(input);
   }
-
-  ASSERT_EQ(publisher.queue_.size(), kMaxFrames);
-  EXPECT_EQ(publisher.queue_bytes_, kMaxFrames * input_bytes);
-  publisher.enqueue(input);
-
-  // Dropping any input can lose a request ID reuse or STOP. The next frame
-  // consumed must invalidate correlation before another result is accepted.
-  ASSERT_EQ(publisher.queue_.size(), 1U);
-  EXPECT_TRUE(publisher.queue_.front().reset);
-  EXPECT_TRUE(publisher.queue_.front().input.message.empty());
-  EXPECT_EQ(publisher.queue_bytes_, 0U);
+  ASSERT_EQ(publisher.queue_.size(), kCapacity);
+  EXPECT_EQ(publisher.queue_.front().sequence, 0U);
 
   publisher.enqueue(input);
-  ASSERT_EQ(publisher.queue_.size(), 2U);
-  EXPECT_TRUE(publisher.queue_.front().reset);
-  EXPECT_FALSE(publisher.queue_.back().reset);
+  ASSERT_EQ(publisher.queue_.size(), kCapacity);
+  EXPECT_EQ(publisher.queue_.front().sequence, 1U);
+  EXPECT_EQ(publisher.queue_.back().sequence, kCapacity);
+  EXPECT_EQ(publisher.queue_bytes_, kCapacity * bytes);
   EXPECT_EQ(publisher.queue_.back().input.message, kAnswer);
-  EXPECT_EQ(publisher.queue_bytes_, input_bytes);
-  EXPECT_FALSE(publisher.hasStarted());
+
+  // Repeated overflow keeps a contiguous FIFO window of the newest input.
+  publisher.enqueue(input);
+  EXPECT_EQ(publisher.queue_.front().sequence, 2U);
+  EXPECT_EQ(publisher.queue_.back().sequence, kCapacity + 1U);
+  EXPECT_EQ(publisher.queue_bytes_, kCapacity * bytes);
 }
 
-TEST(MDNSPublisherTests, queue_byte_limit) {
+TEST(MDNSPublisherTests, queue_byte_limit_evicts_oldest) {
   MDNSEventPublisher publisher;
   constexpr std::size_t kMaxBytes{16U * 1024U * 1024U};
   constexpr std::size_t kMessageBytes{8192U};
   const mdns::Input input{std::string(kMessageBytes, 'x'), "", 228};
-
   for (std::size_t i = 0; i < kMaxBytes / kMessageBytes; ++i) {
     publisher.enqueue(input);
   }
   ASSERT_EQ(publisher.queue_bytes_, kMaxBytes);
 
-  publisher.enqueue({"x", "", 228});
-  ASSERT_EQ(publisher.queue_.size(), 1U);
-  EXPECT_TRUE(publisher.queue_.front().reset);
-  EXPECT_EQ(publisher.queue_bytes_, 0U);
+  publisher.enqueue({"new", "", 228});
+  EXPECT_EQ(publisher.queue_.size(), kMaxBytes / kMessageBytes);
+  EXPECT_EQ(publisher.queue_.front().sequence, 1U);
+  EXPECT_EQ(publisher.queue_.back().input.message, "new");
+  EXPECT_EQ(publisher.queue_bytes_, kMaxBytes - kMessageBytes + 3U);
 
-  // An individual oversized input must not bypass the aggregate byte limit.
-  publisher.enqueue({std::string(kMaxBytes + 1U, 'x'), "", 228});
-  ASSERT_EQ(publisher.queue_.size(), 1U);
-  EXPECT_TRUE(publisher.queue_.front().reset);
-  EXPECT_EQ(publisher.queue_bytes_, 0U);
+  // A larger incoming frame may need more than one old frame evicted.
+  publisher.enqueue({std::string(kMessageBytes * 2U, 'y'), "", 228});
+  EXPECT_EQ(publisher.queue_.front().sequence, 3U);
+  EXPECT_EQ(publisher.queue_bytes_, kMaxBytes - kMessageBytes + 3U);
+  EXPECT_EQ(publisher.queue_.back().input.message.size(), kMessageBytes * 2U);
 }
 
-TEST(MDNSPublisherTests, source_loss_resets_correlation) {
+TEST(MDNSPublisherTests, oversized_input_preserves_pending_input) {
   MDNSEventPublisher publisher;
   publisher.record(makeInput(kQuery));
-  ASSERT_EQ(publisher.parser_.pending(), 1U);
   publisher.enqueue(makeInput(kAnswer));
+  const auto bytes = publisher.queue_bytes_;
 
-  const auto bytes_before = publisher.queue_bytes_;
-  publisher.sourceLoss();
-
+  constexpr std::size_t kMaxBytes{16U * 1024U * 1024U};
+  publisher.enqueue({std::string(kMaxBytes + 1U, 'x'), "", 228});
+  ASSERT_EQ(publisher.queue_.size(), 1U);
+  EXPECT_EQ(publisher.queue_bytes_, bytes);
+  publisher.enqueue(makeInput(kAnswer));
   ASSERT_EQ(publisher.queue_.size(), 2U);
-  EXPECT_FALSE(publisher.queue_.front().reset);
-  EXPECT_TRUE(publisher.queue_.back().reset);
-  EXPECT_EQ(publisher.queue_bytes_, bytes_before);
 
+  publisher.processFrame(publisher.queue_.front());
+  ASSERT_EQ(publisher.batch_.size(), 2U);
+  EXPECT_EQ(publisher.batch_.back().at("correlated"), "1");
+  publisher.processFrame(publisher.queue_.back());
+  ASSERT_EQ(publisher.batch_.size(), 1U);
+  EXPECT_EQ(publisher.batch_.back().at("correlated"), "0");
+  EXPECT_EQ(publisher.parser_.pending(), 0U);
+}
+
+TEST(MDNSPublisherTests, repeated_gaps_reset_correlation) {
+  MDNSEventPublisher publisher;
+  publisher.queue_.set_capacity(3U);
+  publisher.enqueue(makeInput(kQuery));
+  publisher.processFrame(publisher.queue_.front());
+  publisher.queue_bytes_ = 0;
+  publisher.queue_.pop_front();
+  ASSERT_EQ(publisher.parser_.pending(), 1U);
+
+  for (std::size_t i = 0; i < 4U; ++i) {
+    publisher.enqueue(makeInput(kAnswer));
+  }
+  // Sequence 1 was evicted. Reset before sequence 2, not after retained input.
+  EXPECT_EQ(publisher.queue_.front().sequence, 2U);
+  publisher.processFrame(publisher.queue_.front());
+  ASSERT_EQ(publisher.batch_.size(), 1U);
+  EXPECT_EQ(publisher.batch_.back().at("correlated"), "0");
+  publisher.queue_bytes_ -= publisher.queue_.front().input.message.size() +
+                            publisher.queue_.front().input.timestamp.size();
+  publisher.queue_.pop_front();
+
+  // A later overflow can also evict a source-loss marker. The sequence gap
+  // still resets correlation, and surviving START input can establish it anew.
+  publisher.sourceLoss();
+  publisher.enqueue(makeInput(kAnswer));
+  publisher.enqueue(makeInput(kAnswer));
+  publisher.enqueue(makeInput(kQuery));
   publisher.enqueue(makeInput(kAnswer));
   ASSERT_EQ(publisher.queue_.size(), 3U);
-  EXPECT_TRUE(publisher.queue_[1].reset);
-  EXPECT_FALSE(publisher.queue_[2].reset);
-  EXPECT_EQ(publisher.queue_[2].input.message, kAnswer);
-  EXPECT_FALSE(publisher.hasStarted());
+  EXPECT_EQ(publisher.queue_.front().sequence, 7U);
+  for (const auto& frame : publisher.queue_) {
+    publisher.processFrame(frame);
+  }
+  ASSERT_EQ(publisher.batch_.size(), 3U);
+  EXPECT_EQ(publisher.batch_.front().at("correlated"), "0");
+  EXPECT_EQ(publisher.batch_.back().at("correlated"), "1");
+  EXPECT_EQ(publisher.batch_.back().at("client_pid"), "1204");
 }
 
 TEST(MDNSSubscriberTests, disabled_collection_does_not_initialize_source) {
@@ -150,8 +186,10 @@ class MDNSDatabaseTests : public testing::Test {
   void SetUp() override {
     saved_enabled_ = FLAGS_enable_dns_lookup_events;
     saved_disable_events_ = FLAGS_disable_events;
+    saved_events_max_ = FLAGS_events_max;
     FLAGS_enable_dns_lookup_events = true;
     FLAGS_disable_events = false;
+    FLAGS_events_max = 0;
     setToolType(ToolType::TEST);
     registryAndPluginInit();
     ASSERT_TRUE(initDatabasePluginForTesting().ok());
@@ -162,12 +200,168 @@ class MDNSDatabaseTests : public testing::Test {
     EventFactory::end(true);
     FLAGS_enable_dns_lookup_events = saved_enabled_;
     FLAGS_disable_events = saved_disable_events_;
+    FLAGS_events_max = saved_events_max_;
   }
 
  private:
   bool saved_enabled_{false};
   bool saved_disable_events_{false};
+  std::uint64_t saved_events_max_{0};
 };
+
+TEST_F(MDNSDatabaseTests, publishes_partial_and_full_batches) {
+  auto publisher = std::make_shared<MDNSEventPublisher>();
+  ASSERT_TRUE(EventFactory::registerEventPublisher(publisher).ok());
+  auto subscriber = std::make_shared<DNSLookupEventSubscriber>();
+  subscriber->setName("dns_lookup_events");
+  ASSERT_TRUE(EventFactory::registerEventSubscriber(subscriber).ok());
+
+  // A sustained burst reaches standard event storage, with at most a partial
+  // publication batch held in memory.
+  constexpr std::size_t kAnswerCount{8193U};
+  publisher->record(makeInput(kQuery));
+  for (std::size_t i = 0; i < kAnswerCount; ++i) {
+    publisher->record(makeInput(kAnswer));
+  }
+  EXPECT_EQ(subscriber->numEvents(), 8192U);
+  EXPECT_EQ(publisher->batch_.size(), 2U);
+  publisher->flush();
+  EXPECT_TRUE(publisher->batch_.empty());
+  EXPECT_EQ(subscriber->numEvents(), kAnswerCount + 1U);
+
+  QueryData rows;
+  auto status = query(
+      "SELECT COUNT(*) AS total, COUNT(DISTINCT eid) AS distinct_ids "
+      "FROM dns_lookup_events WHERE time >= 0",
+      rows);
+  ASSERT_TRUE(status.ok()) << status.getMessage();
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().at("total"), std::to_string(kAnswerCount + 1U));
+  EXPECT_EQ(rows.front().at("distinct_ids"), std::to_string(kAnswerCount + 1U));
+  EXPECT_FALSE(publisher->hasStarted());
+}
+
+TEST_F(MDNSDatabaseTests, source_loss_preserves_delivery_order) {
+  auto publisher = std::make_shared<MDNSEventPublisher>();
+  ASSERT_TRUE(EventFactory::registerEventPublisher(publisher).ok());
+  auto subscriber = std::make_shared<DNSLookupEventSubscriber>();
+  subscriber->setName("dns_lookup_events");
+  ASSERT_TRUE(EventFactory::registerEventSubscriber(subscriber).ok());
+
+  publisher->enqueue(makeInput(kQuery));
+  publisher->enqueue(makeInput(kAnswer));
+  publisher->sourceLoss();
+
+  // A response after source loss has no correlation. A new request can
+  // establish fresh correlation without discarding either response.
+  publisher->enqueue(makeInput(kAnswer));
+  publisher->enqueue(makeInput(kQuery));
+  publisher->enqueue(makeInput(kAnswer));
+  for (const auto& frame : publisher->queue_) {
+    publisher->processFrame(frame);
+  }
+  publisher->flush();
+  EXPECT_EQ(subscriber->numEvents(), 5U);
+
+  QueryData rows;
+  auto status = query(
+      "SELECT kind, correlated, COUNT(*) AS total FROM dns_lookup_events "
+      "WHERE time >= 0 GROUP BY kind, correlated",
+      rows);
+  ASSERT_TRUE(status.ok()) << status.getMessage();
+  ASSERT_EQ(rows.size(), 3U);
+  std::map<std::pair<std::string, std::string>, std::string> counts;
+  for (const auto& row : rows) {
+    counts[{row.at("kind"), row.at("correlated")}] = row.at("total");
+  }
+  EXPECT_EQ(counts[std::make_pair("answer", "1")], "2");
+  EXPECT_EQ(counts[std::make_pair("answer", "0")], "1");
+  EXPECT_EQ(counts[std::make_pair("query", "1")], "2");
+  EXPECT_FALSE(publisher->hasStarted());
+}
+
+TEST_F(MDNSDatabaseTests, queue_overflow_resets_before_retained_input) {
+  auto publisher = std::make_shared<MDNSEventPublisher>();
+  ASSERT_TRUE(EventFactory::registerEventPublisher(publisher).ok());
+  auto subscriber = std::make_shared<DNSLookupEventSubscriber>();
+  subscriber->setName("dns_lookup_events");
+  ASSERT_TRUE(EventFactory::registerEventSubscriber(subscriber).ok());
+
+  publisher->record(makeInput(kQuery));
+  constexpr std::size_t kCapacity{8192U};
+  for (std::size_t i = 0; i < kCapacity; ++i) {
+    publisher->enqueue(makeInput(kAnswer));
+  }
+  auto new_query = kQuery;
+  new_query.replace(new_query.find("1204"), 4, "2204");
+  publisher->enqueue(makeInput(new_query));
+  publisher->enqueue(makeInput(kAnswer));
+  ASSERT_EQ(publisher->queue_.size(), kCapacity);
+
+  for (const auto& frame : publisher->queue_) {
+    publisher->processFrame(frame);
+  }
+  publisher->flush();
+  EXPECT_EQ(subscriber->numEvents(), kCapacity + 1U);
+
+  QueryData rows;
+  auto status = query(
+      "SELECT pid, correlated, COUNT(*) AS total FROM dns_lookup_events "
+      "WHERE time >= 0 AND kind = 'answer' GROUP BY pid, correlated",
+      rows);
+  ASSERT_TRUE(status.ok()) << status.getMessage();
+  ASSERT_EQ(rows.size(), 2U);
+  std::map<std::pair<std::string, std::string>, std::string> counts;
+  for (const auto& row : rows) {
+    counts[{row.at("pid"), row.at("correlated")}] = row.at("total");
+  }
+  EXPECT_EQ(counts[std::make_pair("-1", "0")], std::to_string(kCapacity - 2U));
+  EXPECT_EQ(counts[std::make_pair("2204", "1")], "1");
+}
+
+TEST_F(MDNSDatabaseTests, honors_standard_event_buffer_limit) {
+  auto publisher = std::make_shared<MDNSEventPublisher>();
+  ASSERT_TRUE(EventFactory::registerEventPublisher(publisher).ok());
+  auto subscriber = std::make_shared<DNSLookupEventSubscriber>();
+  subscriber->setName("dns_lookup_events");
+  ASSERT_TRUE(EventFactory::registerEventSubscriber(subscriber).ok());
+
+  const auto publish_batch = [&publisher] {
+    publisher->record(makeInput(kQuery));
+    for (std::size_t i = 1U; i < 128U; ++i) {
+      publisher->record(makeInput(kAnswer));
+    }
+  };
+  publish_batch();
+  EXPECT_EQ(subscriber->numEvents(), 128U);
+
+  QueryData rows;
+  auto status =
+      query("SELECT MAX(time) AS latest FROM dns_lookup_events WHERE time >= 0",
+            rows);
+  ASSERT_TRUE(status.ok()) << status.getMessage();
+  ASSERT_EQ(rows.size(), 1U);
+  const auto first_time = std::stoull(rows.front().at("latest"));
+
+  // events_max is a limit on timestamp batches. Updating it after publisher
+  // registration must use the framework's oldest-first eviction policy.
+  FLAGS_events_max = 1;
+  while (getUnixTime() <= first_time) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  publish_batch();
+  EXPECT_EQ(subscriber->numEvents(), 256U);
+
+  rows.clear();
+  status = query(
+      "SELECT COUNT(*) AS total, MIN(time) AS oldest "
+      "FROM dns_lookup_events WHERE time >= 0",
+      rows);
+  ASSERT_TRUE(status.ok()) << status.getMessage();
+  ASSERT_EQ(rows.size(), 1U);
+  EXPECT_EQ(rows.front().at("total"), "128");
+  EXPECT_GT(std::stoull(rows.front().at("oldest")), first_time);
+}
 
 TEST_F(MDNSDatabaseTests, persists_shared_schema_through_event_framework) {
   auto publisher = std::make_shared<MDNSEventPublisher>();
@@ -251,10 +445,13 @@ TEST_F(MDNSDatabaseTests, dispatch_respects_publisher_shutdown) {
   // after EventFactory marks the publisher as ending.
   publisher->record(makeInput(kQuery));
   publisher->record(makeInput(kAnswer));
-  ASSERT_EQ(publisher->batch_.size(), 2U);
+  publisher->sourceLoss();
   publisher->isEnding(true);
-  publisher->flush();
+  for (const auto& frame : publisher->queue_) {
+    publisher->processFrame(frame);
+  }
   EXPECT_TRUE(publisher->batch_.empty());
+  EXPECT_EQ(publisher->parser_.pending(), 0U);
   EXPECT_EQ(publisher->numEvents(), 1U);
   EXPECT_EQ(subscriber->numEvents(), 2U);
 

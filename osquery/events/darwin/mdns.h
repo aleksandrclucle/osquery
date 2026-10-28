@@ -13,8 +13,10 @@
 #pragma once
 #include <atomic>
 #include <condition_variable>
-#include <deque>
+#include <cstdint>
 #include <mutex>
+
+#include <boost/circular_buffer.hpp>
 #include <osquery/events/darwin/mdns_parser.h>
 #include <osquery/events/eventpublisher.h>
 #include <osquery/events/eventsubscriber.h>
@@ -33,27 +35,36 @@ class MDNSEventPublisher final
   Status run() override;
 
  private:
+  struct Frame {
+    mdns::Input input;
+    std::uint64_t sequence;
+    bool reset;
+  };
+
+  void processFrame(const Frame&);
   void record(const mdns::Input&);
   void flush();
   void readLoop();
   void enqueue(mdns::Input, bool reset = false);
   void sourceLoss();
 
-  FRIEND_TEST(MDNSPublisherTests, queue_overflow_resets_correlation);
-  FRIEND_TEST(MDNSPublisherTests, queue_byte_limit);
-  FRIEND_TEST(MDNSPublisherTests, source_loss_resets_correlation);
+  FRIEND_TEST(MDNSPublisherTests, queue_overflow_retains_newest_input);
+  FRIEND_TEST(MDNSPublisherTests, queue_byte_limit_evicts_oldest);
+  FRIEND_TEST(MDNSPublisherTests, oversized_input_preserves_pending_input);
+  FRIEND_TEST(MDNSPublisherTests, repeated_gaps_reset_correlation);
+  FRIEND_TEST(MDNSDatabaseTests, publishes_partial_and_full_batches);
+  FRIEND_TEST(MDNSDatabaseTests, source_loss_preserves_delivery_order);
+  FRIEND_TEST(MDNSDatabaseTests, queue_overflow_resets_before_retained_input);
+  FRIEND_TEST(MDNSDatabaseTests, honors_standard_event_buffer_limit);
   FRIEND_TEST(MDNSDatabaseTests,
               persists_shared_schema_through_event_framework);
   FRIEND_TEST(MDNSDatabaseTests, dispatch_respects_publisher_shutdown);
 
-  struct Frame {
-    mdns::Input input;
-    bool reset;
-  };
   std::mutex queue_mutex_;
   std::condition_variable queue_ready_;
-  std::deque<Frame> queue_;
+  boost::circular_buffer<Frame> queue_{8192};
   std::size_t queue_bytes_{0};
+  std::uint64_t next_sequence_{0}, expected_sequence_{0};
   std::atomic<bool> reader_done_{false};
   mdns::Parser parser_;
   std::vector<Row> batch_;

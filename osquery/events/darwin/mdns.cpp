@@ -58,24 +58,45 @@ void MDNSEventPublisher::flush() {
   last_flush_ = mdns::Clock::now();
   parser_.prune(last_flush_);
 }
+void MDNSEventPublisher::processFrame(const Frame& frame) {
+  if (frame.sequence != expected_sequence_) {
+    LOG(WARNING) << "mDNSResponder: input gap; discarded "
+                 << frame.sequence - expected_sequence_
+                 << " messages before the retained input";
+    flush();
+    parser_.reset();
+  }
+  expected_sequence_ = frame.sequence + 1;
+  if (frame.reset) {
+    flush();
+    parser_.reset();
+  } else {
+    record(frame.input);
+  }
+}
+
 void MDNSEventPublisher::enqueue(mdns::Input input, bool reset) {
-  constexpr std::size_t maxQueueBytes = 16 * 1024 * 1024, maxFrames = 8192;
+  constexpr std::size_t maxQueueBytes = 16 * 1024 * 1024;
   std::lock_guard<std::mutex> lock(queue_mutex_);
+  const auto sequence = next_sequence_++;
   const auto input_bytes = input.message.size() + input.timestamp.size();
-  if (queue_.size() >= maxFrames ||
-      input_bytes > maxQueueBytes - queue_bytes_) {
-    // A missing START or STOP makes subsequent PID/name correlation unsafe.
-    // Discard pending input and serialize a reset before accepting more data.
-    queue_.clear();
-    queue_bytes_ = 0;
-    queue_.push_back({{}, true});
-    LOG(WARNING) << "mDNSResponder: input queue limit reached; discarding "
-                    "queued input and resetting correlation";
-    queue_ready_.notify_one();
+  if (input_bytes > maxQueueBytes) {
+    // The skipped sequence invalidates correlation before the next accepted
+    // message without discarding earlier input that still fits in the queue.
     return;
   }
-  queue_bytes_ += input.message.size() + input.timestamp.size();
-  queue_.push_back({std::move(input), reset});
+  while (!queue_.empty() && input_bytes > maxQueueBytes - queue_bytes_) {
+    const auto& oldest = queue_.front().input;
+    queue_bytes_ -= oldest.message.size() + oldest.timestamp.size();
+    queue_.pop_front();
+  }
+  if (queue_.full()) {
+    // circular_buffer replaces the oldest frame when its capacity is reached.
+    const auto& oldest = queue_.front().input;
+    queue_bytes_ -= oldest.message.size() + oldest.timestamp.size();
+  }
+  queue_.push_back({std::move(input), sequence, reset});
+  queue_bytes_ += input_bytes;
   queue_ready_.notify_one();
 }
 
@@ -155,12 +176,7 @@ Status MDNSEventPublisher::run() {
       }
     }
     if (have_frame) {
-      if (frame.reset) {
-        flush();
-        parser_.reset();
-      } else {
-        record(frame.input);
-      }
+      processFrame(frame);
     }
     if (mdns::Clock::now() - last_flush_ >= std::chrono::milliseconds(500)) {
       flush();
